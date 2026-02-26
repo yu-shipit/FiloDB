@@ -303,7 +303,7 @@ class RecordBuilder(memFactory: MemFactory,
    */
   def addMap(map: Map[ZCUTF8, ZCUTF8]): Unit = {
     startMap()
-    map.toSeq.sortBy(_._1).foreach { case (k, v) =>
+    map.toSeq.foreach { case (k, v) =>
       addMapKeyValue(k.bytes, v.bytes)
     }
     endMap()
@@ -618,7 +618,7 @@ object RecordBuilder {
     * @param pairs an unsorted list of key-value pairs.  Will be mutated and sorted.
     */
   final def sortAndComputeHashes(pairs: java.util.ArrayList[(String, String)]): Array[Int] = {
-    pairs.sort(stringPairComparator)
+    // pairs.sort(stringPairComparator)  // Sort disabled
     val hashes = new Array[Int](pairs.size)
     cforRange { 0 until pairs.size } { i =>
       val (k, v) = pairs.get(i)

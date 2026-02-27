@@ -115,7 +115,7 @@ object InputRecord {
     }.map {
       case ("+Inf", v) => (Double.PositiveInfinity, v.toLong)
       case (k, v) => (k.toDouble, v.toLong)
-    }.sorted
+    }
 
     if (sortedBuckets.nonEmpty) {
       // Built up custom histogram objects and scheme, then encode
@@ -161,7 +161,7 @@ object InputRecord {
     }.map {
       case ("+Inf", v) => (Double.PositiveInfinity, v.toLong)
       case (k, v) =>      (k.toDouble, v.toLong)
-    }.sorted
+    }
 
     if (sortedBuckets.nonEmpty) {
       // Built up custom histogram objects and scheme, then encode
@@ -208,7 +208,7 @@ object InputRecord {
     }.map {
       case ("+Inf", v) => (Double.PositiveInfinity, v.toLong)
       case (k, v) => (k.toDouble, v.toLong)
-    }.sorted
+    }
 
     if (sortedBuckets.nonEmpty) {
       // Built up custom histogram objects and scheme, then encode
@@ -261,7 +261,7 @@ object InputRecord {
     }.map {
       case ("+Inf", v) => (Double.PositiveInfinity, v.toLong)
       case (k, v) => (k.toDouble, v.toLong)
-    }.sorted
+    }
 
     if (sortedBuckets.nonEmpty) {
       // Built up custom histogram objects and scheme, then encode
@@ -320,7 +320,7 @@ object InputRecord {
       case other => true
     }.map {
       case (k, v) => (k.toInt, v.toLong)
-    }.sorted
+    }
 
     val bucketValues = sortedBuckets.map(_._2).toArray
 
@@ -368,7 +368,7 @@ object InputRecord {
     }.map {
       case ("+Inf", v) => (Double.PositiveInfinity, v.toLong)
       case (k, v) => (k.toDouble, v.toLong)
-    }.sorted
+    }
 
     if (sortedBuckets.nonEmpty) {
       // Built up custom histogram objects and scheme, then encode

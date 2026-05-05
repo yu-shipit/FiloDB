@@ -196,7 +196,7 @@ class PeriodicRateFunctionsSpec extends RawDataWindowingSpec with ScalaFutures {
       val rawData = RawPartData(Array.empty, Seq.empty)
       // simulate downsampled partition with resolution set as publishInterval
       val p1 = new PagedReadablePartition(Schemas.promCounter, 0, -1, rawData, publishInterval)
-      val rv = RawDataRangeVector(CustomRangeVectorKey(Map.empty), p1, InMemoryChunkScan, Array(), new AtomicLong(0), new AtomicLong(0), 0, "")
+      val rv = RawDataRangeVector(CustomRangeVectorKey(Map.empty), p1, InMemoryChunkScan, Array(), new AtomicLong(0), (rowCount) => {}, 0, "")
 
       // looback is extended to 2 * publishInterval when less than 2 * publishInterval
       val periodicSamplesVectorFnMapper = exec.PeriodicSamplesMapper(500000L, 400000L, 1300000L,
@@ -215,7 +215,7 @@ class PeriodicRateFunctionsSpec extends RawDataWindowingSpec with ScalaFutures {
 
       // lookback is not extended for delta schemas
       val p2 = new PagedReadablePartition(Schemas.otelDeltaHistogram, 0, -1, rawData, publishInterval)
-      val rv2 = RawDataRangeVector(CustomRangeVectorKey(Map.empty), p2, InMemoryChunkScan, Array(), new AtomicLong(0), new AtomicLong(0), 0, "")
+      val rv2 = RawDataRangeVector(CustomRangeVectorKey(Map.empty), p2, InMemoryChunkScan, Array(), new AtomicLong(0), (rowCount) => {}, 0, "")
       periodicSamplesVectorFnMapper3.extendLookback(rv, 3) shouldEqual 3
 
     }
@@ -424,15 +424,9 @@ class PeriodicRateFunctionsSpec extends RawDataWindowingSpec with ScalaFutures {
       1300000L -> 100d
     )
 
-    import ZeroCopyUTF8String._
     val resultSchema = ResultSchema(Schemas.deltaCounter.infosFromIDs(0 to 1), 1)
 
-    // step tag with 100s publish interval is important here
-    val seriesTags = Map("_ws_".utf8 -> "my_ws".utf8, "_ns_".utf8 -> "my_ns".utf8, "_step_".utf8 -> "100".utf8)
-    val partBuilder = new RecordBuilder(TestData.nativeMem)
-    val partKey = partBuilder.partKeyFromObjects(Schemas.deltaCounter, "counterName".utf8, seriesTags)
-
-    val rv = timeValueRVPk(samples, partKey)
+    val rv = deltaTimeValueRV(samples.map(_._2), 100000, 100000)
 
     val expectedResults = List(
       500000L -> 200d,

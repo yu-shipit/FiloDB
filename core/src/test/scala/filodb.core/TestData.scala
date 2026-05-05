@@ -4,6 +4,7 @@ import java.util.concurrent.atomic.AtomicLong
 
 import scala.concurrent.duration._
 import scala.io.Source
+import scala.util.Random.nextInt
 
 import com.typesafe.config.ConfigFactory
 import monix.eval.Task
@@ -475,7 +476,7 @@ object MachineMetricsData {
       false, Option.empty, false, 1.hour.toMillis) }
     // Now flush and ingest the rest to ensure two separate chunks
     part.switchBuffers(histIngestBH, encode = true)
-    (histData, RawDataRangeVector(null, part, AllChunkScan, Array(0, 3), new AtomicLong, new AtomicLong, Long.MaxValue, "query-id"))  // select timestamp and histogram columns only
+    (histData, RawDataRangeVector(null, part, AllChunkScan, Array(0, 3), new AtomicLong, (rowCount) => {}, Long.MaxValue, "query-id"))  // select timestamp and histogram columns only
   }
 
   private val histMaxBP = new WriteBufferPool(TestData.nativeMem, histMaxMinDS.schema.data, TestData.storeConf)
@@ -492,7 +493,7 @@ object MachineMetricsData {
     part.switchBuffers(histMaxMinBH, encode = true)
     // Select timestamp, hist, max, min
     (histData, RawDataRangeVector(null, part, AllChunkScan, Array(0, 3, 5, 4),
-      new AtomicLong, new AtomicLong, Long.MaxValue, "query-id"))
+      new AtomicLong, (rowCount) => {}, Long.MaxValue, "query-id"))
   }
 
   // Buffer pool and BlockMemFactory for cumulative histograms
@@ -512,7 +513,39 @@ object MachineMetricsData {
     part.switchBuffers(cumulativeHistMaxMinBH, encode = true)
     // Select timestamp, hist, max, min
     (histData, RawDataRangeVector(null, part, AllChunkScan, Array(0, 3, 5, 4),
-      new AtomicLong, new AtomicLong, Long.MaxValue, "query-id"))
+      new AtomicLong, (rowCount) => {}, Long.MaxValue, "query-id"))
+  }
+
+  // Dataset for CumlDeltaTogglerChunkedFunction tests: cumulative histogram with detectDrops=true on
+  // count/sum (so hasCumulativeTemporalityColumn = true) and counter=true on hist (CounterVectorReader).
+  // Column layout matches histMaxMinDS so col IDs 4=min, 5=max are reusable.
+  val cumulHistDS = Dataset.make("cuml-hist",
+    Seq("metric:string", "tags:map"),
+    Seq("timestamp:ts", "count:double:detectDrops=true", "sum:double:detectDrops=true",
+        "h:hist:counter=true", "min:double", "max:double"),
+    valueColumn = Some("h")).get
+
+  private val cumulHistBP = new WriteBufferPool(TestData.nativeMem, cumulHistDS.schema.data, TestData.storeConf)
+  val cumulHistBH = new BlockMemFactory(blockStore, cumulHistDS.schema.data.blockMetaSize, dummyContext, true)
+
+  // Generates a cumulative histogram RV for CumlDeltaTogglerChunkedFunction tests.
+  // The schema has hasCumulativeTemporalityColumn = true and counter=true histogram vectors.
+  def cumulHistRV(startTS: Long = 100000L, pubFreq: Long = 10000L, numSamples: Int = 100, numBuckets: Int = 8):
+  (Stream[Seq[Any]], RawDataRangeVector) = {
+    val rawData = histMaxMin(linearHistSeries(startTS, 1, pubFreq.toInt, numBuckets)).take(numSamples)
+    // cumulHistDS has count:double and sum:double so cast from Long values in linearHistSeries
+    val histData = rawData.map { row =>
+      Seq(row(0), row(1).asInstanceOf[Long].toDouble, row(2).asInstanceOf[Long].toDouble) ++ row.drop(3)
+    }
+    val container = records(cumulHistDS, histData).records
+    val part = TimeSeriesPartitionSpec.makePart(0, cumulHistDS, partKey = histPartKey, bufferPool = cumulHistBP)
+    container.iterate(cumulHistDS.ingestionSchema).foreach { row =>
+      part.ingest(0, row, cumulHistBH, false, Option.empty, false)
+    }
+    part.switchBuffers(cumulHistBH, encode = true)
+    // Select timestamp=0, hist=3, max=5, min=4
+    (rawData, RawDataRangeVector(null, part, AllChunkScan, Array(0, 3, 5, 4),
+      new AtomicLong, _ => {}, Long.MaxValue, "query-id"))
   }
 }
 
@@ -564,6 +597,14 @@ object MetricsTestData {
   val defaultPartKey = partKeyBuilder.partKeyFromObjects(timeseriesDatasetWithMetric.schema, "metric1",
     Map("__name__".utf8 -> "metric1".utf8, "_ws_".utf8     -> "testws".utf8, "_ns_".utf8     -> "testns".utf8))
 
+  // Same partition schema as timeseriesDatasetWithMetric but without detectDrops → delta temporality
+  val deltaTimeseriesDatasetWithMetric = Dataset.make("delta-timeseries",
+    Seq("_metric_:string", "tags:map"),
+    Seq("timestamp:ts", "value:double:{detectDrops=false,delta=true}"),
+    Seq.empty,
+    None,
+    DatasetOptions(Seq("_metric_", "_ns_"), "_metric_")).get
+
   val timeseriesDatasetMultipleShardKeys = Dataset.make("timeseries",
     Seq("tags:map"),
     Seq("timestamp:ts", "value:double:detectDrops=true"),
@@ -578,6 +619,15 @@ object MetricsTestData {
     options = DatasetOptions(Seq("__name__"), "__name__", true)
   ).get
   val downsampleSchema = downsampleDataset.schema
+
+  def timeSeriesData(tags: Map[ZeroCopyUTF8String, ZeroCopyUTF8String]): Stream[Seq[Any]] = {
+    val initTs = 0L
+    Stream.from(0).map { n =>
+      Seq(initTs + n * 1000,
+        (45 + nextInt(10)).toDouble,
+        "cpu_usage".utf8, tags)
+    }
+  }
 
   val builder = new RecordBuilder(MemFactory.onHeapFactory)
 

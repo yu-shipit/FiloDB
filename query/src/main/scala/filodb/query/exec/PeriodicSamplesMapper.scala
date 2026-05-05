@@ -78,7 +78,7 @@ final case class PeriodicSamplesMapper(startMs: Long,
     // Really, use the stale lookback window size, not 0 which doesn't make sense
     // Default value for window  should be queryConfig.staleSampleAfterMs + 1 for empty functionId,
     // so that it returns value present at time - staleSampleAfterMs
-    val windowLength = windowToUse.getOrElse(if (isLastFn) querySession.queryConfig.staleSampleAfterMs + 1 else 0L)
+    val windowLength = windowToUse.getOrElse(querySession.queryConfig.staleSampleAfterMs + 1)
 
     val rvs = sampleRangeFunc match {
       case _: ChunkedRangeFunction[_] if valColType == ColumnType.HistogramColumn =>
@@ -88,11 +88,18 @@ final case class PeriodicSamplesMapper(startMs: Long,
           val chunkedHRangeFunc = rangeFuncGen().asChunkedH
           val minResolutionMs = rdrv.minResolutionMs
           val extendedWindow = extendLookback(rdrv, windowLength)
-          if (chunkedHRangeFunc.isInstanceOf[CounterChunkedRangeFunction[_]] && extendedWindow < minResolutionMs * 2)
+          if (chunkedHRangeFunc.isInstanceOf[CumlDeltaTogglerChunkedFunction[_]] &&
+              extendedWindow < minResolutionMs * 2) {
+            // GOTCHA Note we are expanding this check to both cumulative & delta whereas this applies only
+            // to cumulative metrics. It is done this way since we do not have the information at data scan time to
+            // do this dynamically per time series, when a query can have both cumulative and delta metrics.
+            // Since the restriction applies to downsample dataset only, it is an accepted tradeoff for now.
+            // Improve when the need arises.
             throw new IllegalArgumentException(s"Minimum resolution of data for this time range is " +
               s"${minResolutionMs}ms. However, a lookback of ${windowLength}ms was chosen. This will not " +
               s"yield intended results for rate/increase functions since each lookback window can contain " +
               s"lesser than 2 samples. Increase lookback to more than ${minResolutionMs * 2}ms")
+          }
           IteratorBackedRangeVector(rv.key,
             new ChunkedWindowIteratorH(rdrv, startWithOffset, adjustedStep, endWithOffset,
                     extendedWindow, chunkedHRangeFunc, querySession, histRow), outputRvRange)
@@ -105,12 +112,18 @@ final case class PeriodicSamplesMapper(startMs: Long,
           val minResolutionMs = rdrv.minResolutionMs
           val chunkedDRangeFunc = rangeFuncGen().asChunkedD
           val extendedWindow = extendLookback(rdrv, windowLength)
-          if (chunkedDRangeFunc.isInstanceOf[CounterChunkedRangeFunction[_]] &&
-              extendedWindow < rdrv.minResolutionMs * 2)
+          if (chunkedDRangeFunc.isInstanceOf[CumlDeltaTogglerChunkedFunction[_]] &&
+              extendedWindow < rdrv.minResolutionMs * 2) {
+            // GOTCHA Note we are expanding this check to both cumulative & delta whereas this applies only
+            // to cumulative metrics. It is done this way since we do not have the information at data scan time to
+            // do this dynamically per time series, when a query can have both cumulative and delta metrics.
+            // Since the restriction applies to downsample dataset only, it is an accepted tradeoff for now.
+            // Improve when the need arises.
             throw new IllegalArgumentException(s"Minimum resolution of data for this time range is " +
               s"${minResolutionMs}ms. However, a lookback of ${windowLength}ms was chosen. This will not " +
               s"yield intended results for rate/increase functions since each lookback window can contain " +
               s"lesser than 2 samples. Increase lookback to more than ${minResolutionMs * 2}ms")
+          }
           IteratorBackedRangeVector(rv.key,
             new ChunkedWindowIteratorD(rdrv, startWithOffset, adjustedStep, endWithOffset,
                     extendedWindow, chunkedDRangeFunc, querySession), outputRvRange)
@@ -217,14 +230,14 @@ final case class PeriodicSamplesMapper(startMs: Long,
     } else {
       source.copy(columns = source.columns.zipWithIndex.map {
         // Transform if its not a row key column
-        case (ColumnInfo(name, ColumnType.LongColumn, _), i) if i >= source.numRowKeyColumns =>
+        case (ColumnInfo(name, ColumnType.LongColumn, _, _), i) if i >= source.numRowKeyColumns =>
           ColumnInfo("value", ColumnType.DoubleColumn)
-        case (ColumnInfo(name, ColumnType.IntColumn, _), i) if i >= source.numRowKeyColumns =>
+        case (ColumnInfo(name, ColumnType.IntColumn, _, _), i) if i >= source.numRowKeyColumns =>
           ColumnInfo(name, ColumnType.DoubleColumn)
         // For double columns, just rename the output so that it's the same no matter source schema.
         // After all after applying a range function, source column doesn't matter anymore
         // NOTE: we only rename if i is 1 or second column.  If its 2 it might be max which cannot be renamed
-        case (ColumnInfo(name, ColumnType.DoubleColumn, _), i) if i == 1 =>
+        case (ColumnInfo(name, ColumnType.DoubleColumn, _, _), i) if i == 1 =>
           ColumnInfo("value", ColumnType.DoubleColumn)
         case (c: ColumnInfo, _) => c
       }, fixedVectorLen = if (endMs == startMs) Some(1) else Some(((endMs - startMs) / adjustedStep).toInt + 1))
@@ -286,11 +299,11 @@ extends WrappedCursor(rv.rows()) with StrictLogging {
 
     wit.nextWindow()
     while (wit.hasNext) {
-      val nextInfo = wit.next
+      val nextInfo = wit.next()
       try {
-        rangeFunction.addChunks(nextInfo.getTsVectorAccessor, nextInfo.getTsVectorAddr, nextInfo.getTsReader,
-                                nextInfo.getValueVectorAccessor, nextInfo.getValueVectorAddr, nextInfo.getValueReader,
-                                wit.curWindowStart, wit.curWindowEnd, nextInfo, querySession.queryConfig)
+        rangeFunction.addChunks(rv.partition.schema, nextInfo.getTsVectorAccessor, nextInfo.getTsVectorAddr,
+          nextInfo.getTsReader, nextInfo.getValueVectorAccessor, nextInfo.getValueVectorAddr, nextInfo.getValueReader,
+          wit.curWindowStart, wit.curWindowEnd, nextInfo, querySession.queryConfig)
       } catch {
         case e: Exception =>
           val tsReader = LongBinaryVector(nextInfo.getTsVectorAccessor, nextInfo.getTsVectorAddr)
@@ -306,7 +319,7 @@ extends WrappedCursor(rv.rows()) with StrictLogging {
           throw e
       }
     }
-    rangeFunction.apply(wit.curWindowStart, wit.curWindowEnd, sampleToEmit)
+    rangeFunction.apply(rv.partition.schema, wit.curWindowStart, wit.curWindowEnd, sampleToEmit)
 
     if (!wit.hasMoreWindows) {
       // Release the shared lock and close the iterator, in case it also holds a lock.

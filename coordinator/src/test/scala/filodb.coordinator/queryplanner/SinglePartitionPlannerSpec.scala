@@ -87,7 +87,7 @@ class SinglePartitionPlannerSpec extends AnyFunSpec with Matchers {
     else if (metricName.equals("rr2")) "rules2" else "local"
   }
 
-  val engine = new SinglePartitionPlanner(planners, plannerSelector, dataset, queryConfig)
+  val engine = new SinglePartitionPlanner(planners, plannerSelector, dataset, queryConfig, false)
 
   it("should generate Exec plan for simple query") {
     val lp = Parser.queryToLogicalPlan("test{job = \"app\"}", 1000, 1000)
@@ -175,12 +175,12 @@ class SinglePartitionPlannerSpec extends AnyFunSpec with Matchers {
     val downsamplePlanner = new SingleClusterPlanner(
       dataset, schemas, localMapper, earliestRetainedTimestampFn = 0, queryConfig, "downsample")
 
-    val longTermPlanner = new LongTimeRangePlanner(rawPlanner, downsamplePlanner, 0, 0,
+    val longTermPlanner = new LongTimeRangePlanner(rawPlanner, downsamplePlanner, false, 0, 0,
       InProcessPlanDispatcher(QueryConfig.unitTestingQueryConfig), queryConfig, dataset)
 
     val planners = Map("longtime" -> longTermPlanner, "rules1" -> rrPlanner1, "rules2" -> rrPlanner2)
 
-    val engine = new SinglePartitionPlanner(planners, plannerSelector, dataset, queryConfig)
+    val engine = new SinglePartitionPlanner(planners, plannerSelector, dataset, queryConfig, false)
     val lp = TsCardinalities(Seq("a", "b"), 2, Seq("longtime", "rules1", "rules2"))
 
     // Plan should just contain a single root TsCardReduceExec and its TsCardExec children.
@@ -220,6 +220,16 @@ class SinglePartitionPlannerSpec extends AnyFunSpec with Matchers {
     execPlan.isInstanceOf[PromQlRemoteExec] shouldEqual (true)
     execPlan.asInstanceOf[PromQlRemoteExec].queryContext.origQueryParams.asInstanceOf[PromQlQueryParams].
       promQl shouldEqual("""(test1{job="app"} + test2{job="app"})""")
+  }
+
+  it("should extract partition and pod from StatefulSet actor path") {
+    val dispatcher = ActorPlanDispatcher(node, "test-cluster")
+
+    val actorPath = "akka.tcp://test-system@some-tsdb21-62.test.local:2552/user/coordinator"
+    val (partition, pod) = dispatcher.extractPartitionAndPod(actorPath)
+
+    partition shouldEqual "tsdb21"
+    pod shouldEqual "62"
   }
 }
 

@@ -7,9 +7,9 @@ import java.util
 import java.util.{Base64, PriorityQueue}
 import java.util.concurrent.{ScheduledThreadPoolExecutor, TimeUnit}
 
-import scala.collection.JavaConverters._
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
+import scala.jdk.CollectionConverters._
 
 import com.github.benmanes.caffeine.cache.{Caffeine, LoadingCache}
 import com.googlecode.javaewah.{EWAHCompressedBitmap, IntIterator}
@@ -414,12 +414,12 @@ class PartKeyLuceneIndex(ref: DatasetRef,
     val start = System.nanoTime()
     withNewSearcher { searcher =>
       val reader = searcher.getIndexReader
+      val query = colFiltersToQuery(colFilters, startTime, endTime)
       try {
         val state = readerStateCache.get((reader, colName))
         val fc = new FacetsCollector() {
           override def scoreMode() = ScoreMode.COMPLETE_NO_SCORES
         }
-        val query = colFiltersToQuery(colFilters, startTime, endTime)
         searcher.search(query, fc)
         val facets = new SortedSetDocValuesFacetCounts(state, fc)
         val result = facets.getTopChildren(limit, colName)
@@ -438,7 +438,7 @@ class PartKeyLuceneIndex(ref: DatasetRef,
     labelValuesQueryLatency.record(System.nanoTime() - start)
     readerStateCacheHitRate.update(readerStateCacheShardKeys.stats().hitRate(), Map("label" -> "shardKey"))
     readerStateCacheHitRate.update(readerStateCacheNonShardKeys.stats().hitRate(), Map("label" -> "other"))
-    labelValues
+    labelValues.toSeq
   }
 
   def indexValues(fieldName: String, topK: Int = 100): Seq[TermInfo] = {
@@ -687,7 +687,7 @@ class PartKeyLuceneIndex(ref: DatasetRef,
                                 limit: Int = Int.MaxValue): Seq[PartKeyLuceneIndexRecord] = {
     val collector = new PartKeyRecordCollector(limit)
     searchFromFilters(columnFilters, startTime, endTime, collector)
-    collector.records
+    collector.records.toSeq
   }
 
 
@@ -866,7 +866,7 @@ class CardinalityCountBuilder(partSchema: PartitionSchema, cardTracker: Cardinal
 
       try {
         // update the cardinality count by 1, since the shardKey for each document in index is unique
-        cardTracker.modifyCount(shardKey, 1, 0)
+        cardTracker.modifyCount(shardKey, 1, 0, 0)
       } catch {
         case t: Throwable =>
           logger.error("exception while modifying cardinality tracker count; shardKey=" + shardKey, t)

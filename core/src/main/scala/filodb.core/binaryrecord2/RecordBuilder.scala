@@ -59,9 +59,9 @@ class RecordBuilder(memFactory: MemFactory,
   def currentTimeMillis: Long = System.currentTimeMillis()
 
   // Reset last container and all pointers
-  def reset(): Unit = if (containers.nonEmpty) {
+  def reset(skipTime: Boolean = false): Unit = if (containers.nonEmpty) {
     resetContainerPointers()
-    containers.last.updateTimestamp(currentTimeMillis)
+    if (!skipTime) containers.last.updateTimestamp(currentTimeMillis)
     fieldNo = -1
     mapOffset = -1L
     recHash = -1
@@ -246,10 +246,10 @@ class RecordBuilder(memFactory: MemFactory,
   final def addPartKeyRecordFields(base: Any, offset: Long, partKeySchema: RecordSchema): Unit = {
     var id = 0
     partKeySchema.columns.foreach {
-      case ColumnInfo(_, MapColumn, _) => addBlobFromBr(base, offset, id, partKeySchema); id += 1
-      case ColumnInfo(_, StringColumn, _) => addBlobFromBr(base, offset, id, partKeySchema); id += 1
-      case ColumnInfo(_, LongColumn, _) => addLongFromBr(base, offset, id, partKeySchema); id += 1
-      case ColumnInfo(_, DoubleColumn, _) => addDoubleFromBr(base, offset, id, partKeySchema); id += 1
+      case ColumnInfo(_, MapColumn, _, _) => addBlobFromBr(base, offset, id, partKeySchema); id += 1
+      case ColumnInfo(_, StringColumn, _, _) => addBlobFromBr(base, offset, id, partKeySchema); id += 1
+      case ColumnInfo(_, LongColumn, _, _) => addLongFromBr(base, offset, id, partKeySchema); id += 1
+      case ColumnInfo(_, DoubleColumn, _, _) => addDoubleFromBr(base, offset, id, partKeySchema); id += 1
       case _ => ???
     }
     // finally copy the partition hash over
@@ -309,6 +309,39 @@ class RecordBuilder(memFactory: MemFactory,
     endMap()
   }
 
+  /**
+   * Encodes a Java TreeMap directly into the map field without Scala collection conversion.
+   * TreeMap is already sorted by key, so no re-sorting needed.
+   *
+   * This avoids the overhead of:
+   *   - convertToScalaImmutableMap (Stream, Tuple2, HashMap construction)
+   *   - Scala Map.toSeq.sortBy (TreeMap is already sorted)
+   *   - ZeroCopyUTF8String wrapping
+   *
+   * Produces the same wire format as addMap(Map[ZCUTF8, ZCUTF8]) — identical bytes,
+   * same predefined key handling, same partition hash.
+   *
+   * Usage from Java:
+   *   TreeMap<String, String> tags = new TreeMap<>();
+   *   tags.put("_ns_", "myapp");
+   *   tags.put("_ws_", "demo");
+   *   builder.startNewRecord(schema);
+   *   // ... add other fields ...
+   *   builder.encodeMapFrom(tags);
+   *   builder.endRecord();
+   */
+  final def encodeMapFrom(tags: java.util.TreeMap[String, String]): Unit = {
+    startMap()
+    val iter = tags.entrySet().iterator()
+    while (iter.hasNext) {
+      val entry = iter.next()
+      val keyBytes = entry.getKey.getBytes(StandardCharsets.UTF_8)
+      val valBytes = entry.getValue.getBytes(StandardCharsets.UTF_8)
+      addMapKeyValue(keyBytes, 0, keyBytes.length, valBytes, 0, valBytes.length)
+    }
+    endMap()
+  }
+
   final def updatePartitionHash(newHash: Int): Unit = {
     recHash = combineHash(recHash, newHash)
   }
@@ -331,6 +364,10 @@ class RecordBuilder(memFactory: MemFactory,
    * Takes care of matching and translating predefined keys into short codes.
    * Keys must be < 60KB and values must be < 64KB
    * Hash is not computed or added for you - it must be separately added by you!
+   *
+   * IMPORTANT: MapEncoder.encode() replicates this encoding logic. If the wire format
+   * changes here (predefined key codes, UTF8StringShort/Medium encoding, byte order),
+   * MapEncoder must be updated to match.
    */
   final def addMapKeyValue(keyBytes: Array[Byte], keyOffset: Int, keyLen: Int,
                            valueBytes: Array[Byte], valueOffset: Int, valueLen: Int,
@@ -394,6 +431,24 @@ class RecordBuilder(memFactory: MemFactory,
     }
     mapOffset = -1L
     fieldNo += 1
+  }
+
+  /**
+   * Adds an encoded map field directly from a byte array already in RecordBuilder wire format.
+   * Use MapEncoder.encode() to produce correctly encoded bytes.
+   */
+  final def addEncodedMap(mapBytes: Array[Byte]): Unit = {
+    val numBytes = mapBytes.length
+    require(numBytes < 65536, s"Map bytes too large: $numBytes")
+    startMap()
+    requireBytes(numBytes)
+    UnsafeUtils.unsafe.copyMemory(mapBytes, UnsafeUtils.arayOffset,
+                                  curBase, curRecEndOffset, numBytes)
+    curRecEndOffset += numBytes
+    // update map length and record length
+    setShort(curBase, mapOffset, numBytes.toShort)
+    setInt(curBase, curRecordOffset, (curRecEndOffset - curRecordOffset - 4).toInt)
+    endMap()
   }
 
   /**
@@ -470,7 +525,9 @@ class RecordBuilder(memFactory: MemFactory,
   /**
    * Returns the list of all current containers
    */
-  def allContainers: Seq[RecordContainer] = containers
+  def allContainers: Seq[RecordContainer] = containers.toSeq
+
+  def lastContainer: RecordContainer = containers.last
 
   // Used for debugging...  throws exception if there is no data.  Be careful here.
   def curContainerBase: Any = currentContainer.get.base

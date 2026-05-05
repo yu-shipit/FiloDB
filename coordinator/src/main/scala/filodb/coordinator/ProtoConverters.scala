@@ -1,19 +1,26 @@
 package filodb.coordinator
 
+import java.util.concurrent.TimeUnit
+
+import scala.concurrent.duration.FiniteDuration
+import scala.jdk.CollectionConverters._
+import scala.util.Try
+
 import akka.serialization.SerializationExtension
 import com.google.protobuf.ByteString
 import com.typesafe.config.ConfigFactory
-import java.util.concurrent.TimeUnit
-import scala.collection.JavaConverters._
-import scala.concurrent.duration.FiniteDuration
+import com.typesafe.scalalogging.StrictLogging
+import org.apache.arrow.flight.Location
 
+import filodb.coordinator.flight.SingleClusterFlightPlanDispatcher
 import filodb.core.downsample.{CounterDownsamplePeriodMarker, TimeDownsamplePeriodMarker}
 import filodb.core.memstore.PartLookupResult
 import filodb.core.metadata.{ComputedColumn, DataColumn}
+import filodb.core.metrics.FilodbMetrics
 import filodb.core.query._
 import filodb.core.store.{AllChunkScan, InMemoryChunkScan, TimeRangeChunkScan, WriteBufferChunkScan}
-import filodb.grpc.GrpcMultiPartitionQueryService.{RangeVectorTransformerContainer, RemoteExecPlan}
 import filodb.grpc.GrpcMultiPartitionQueryService
+import filodb.grpc.GrpcMultiPartitionQueryService.{RangeVectorTransformerContainer, RemoteExecPlan}
 import filodb.grpc.GrpcMultiPartitionQueryService.ExecPlanContainer.ExecPlanCase
 import filodb.grpc.GrpcMultiPartitionQueryService.FuncArgs.FuncArgTypeCase
 import filodb.query.{AggregationOperator, QueryCommand}
@@ -24,9 +31,12 @@ import filodb.query.exec._
 // scalastyle:off file.size.limit
 // scalastyle:off method.length
 // scalastyle:off line.size.limit
-object ProtoConverters {
+object ProtoConverters extends StrictLogging {
 
   import filodb.query.ProtoConverters._
+
+  // Increments when a fully-qualified class name is sent as a proto field but not found via reflection.
+  val unexpectedProtoClassNameCounter = FilodbMetrics.counter("unexpected-proto-class-name")
 
   def execPlanToProto(execPlan: ExecPlan): RemoteExecPlan = {
     val plan = execPlan.toExecPlanContainerProto()
@@ -60,6 +70,7 @@ object ProtoConverters {
       builder.addAllGrpcPartitionsDenyList(qc.grpcPartitionsDenyList.asJava)
       qc.plannerSelector.foreach(plannerSelector => builder.setPlannerSelector(plannerSelector))
       qc.recordContainerOverrides.foreach(overrides => builder.putRecordContainerOverrides(overrides._1, overrides._2))
+      builder.setSamplesScannedConfig(qc.samplesScannedConfig.toProto)
       builder.build()
     }
   }
@@ -86,11 +97,150 @@ object ProtoConverters {
         qc.getAllowPartialResultsMetadataQuery(),
         qc.getGrpcPartitionsDenyListList().asScala.toSet,
         if (qc.hasPlannerSelector) Option(qc.getPlannerSelector()) else None,
-        rcoIntMap
+        rcoIntMap,
+        samplesScannedConfig =
+          if (qc.hasSamplesScannedConfig) qc.getSamplesScannedConfig.fromProto
+          else SamplesScannedConfig()
       )
       queryConfig
     }
   }
+
+  implicit class SamplesScannedConfigToProtoConverter(config: SamplesScannedConfig) {
+    def toProto: GrpcMultiPartitionQueryService.SamplesScannedConfig = {
+      val builder = GrpcMultiPartitionQueryService.SamplesScannedConfig.newBuilder()
+      builder.setLeafSamplesEnabled(config.leafSamplesEnabled)
+      builder.setExecResultSamplesEnabled(config.execResultSamplesEnabled)
+      builder.setExecChildSamplesEnabled(config.execChildSamplesEnabled)
+      builder.setRvtSamplesEnabled(config.rvtSamplesEnabled)
+      builder.setRvtChildSamplesEnabled(config.rvtChildSamplesEnabled)
+      builder.setSrvSamplesEnabled(config.srvSamplesEnabled)
+      builder.setDefaultRowMultiplier(config.defaultRowMultiplier)
+      builder.setHistogramRowMultiplier(config.histogramRowMultiplier)
+      builder.setExponentialHistogramRowMultiplier(config.exponentialHistogramRowMultiplier)
+      builder.setDefaultSamplesPerRow(config.defaultSamplesPerRow)
+      builder.setDefaultSamplesPerSeries(config.defaultSamplesPerSeries)
+      builder.setDefaultSamplesPerPartKeyByte(config.defaultSamplesPerPartKeyByte)
+      config.classToSamplesPerRow.foreach { case (clazz, mult) =>
+        builder.putClassToSamplesPerRow(clazz.getName, mult)
+      }
+      config.classToSamplesPerSeries.foreach { case (clazz, mult) =>
+        builder.putClassToSamplesPerSeries(clazz.getName, mult)
+      }
+      config.classToSamplesPerPartKeyByte.foreach { case (clazz, mult) =>
+        builder.putClassToSamplesPerPartKeyByte(clazz.getName, mult)
+      }
+      builder.setDefaultSamplesPerChildRow(config.defaultSamplesPerChildRow)
+      builder.setDefaultSamplesPerChildSeries(config.defaultSamplesPerChildSeries)
+      builder.setDefaultSamplesPerChildPartKeyByte(config.defaultSamplesPerChildPartKeyByte)
+      config.classToSamplesPerChildRow.foreach { case (clazz, mult) =>
+        builder.putClassToSamplesPerChildRow(clazz.getName, mult)
+      }
+      config.classToSamplesPerChildSeries.foreach { case (clazz, mult) =>
+        builder.putClassToSamplesPerChildSeries(clazz.getName, mult)
+      }
+      config.classToSamplesPerChildPartKeyByte.foreach { case (clazz, mult) =>
+        builder.putClassToSamplesPerChildPartKeyByte(clazz.getName, mult)
+      }
+      builder.build()
+    }
+  }
+
+  // scalastyle:off cyclomatic.complexity
+  implicit class SamplesScannedConfigFromProtoConverter(config: GrpcMultiPartitionQueryService.SamplesScannedConfig) {
+    def fromProto: SamplesScannedConfig = {
+      SamplesScannedConfig(
+        config.getLeafSamplesEnabled,
+        config.getExecResultSamplesEnabled,
+        config.getExecChildSamplesEnabled,
+        config.getRvtSamplesEnabled,
+        config.getRvtChildSamplesEnabled,
+        config.getSrvSamplesEnabled,
+        config.getDefaultRowMultiplier,
+        config.getHistogramRowMultiplier,
+        config.getExponentialHistogramRowMultiplier,
+        config.getDefaultSamplesPerRow,
+        config.getDefaultSamplesPerSeries,
+        config.getDefaultSamplesPerPartKeyByte,
+        config.getClassToSamplesPerRowMap.asScala
+          .filter { case (className, _) =>
+            val parseTry = Try(Class.forName(className))
+            if (!parseTry.isSuccess) {
+              unexpectedProtoClassNameCounter.increment()
+              logger.error("Could not find class while deserializing SamplesScannedConfig: " +
+                className, parseTry.failed.get)
+            }
+            parseTry.isSuccess
+          }
+          .map { case (className, mult) => Class.forName(className) -> mult.asInstanceOf[Double] }
+          .toMap,
+        config.getClassToSamplesPerSeriesMap.asScala
+          .filter { case (className, _) =>
+            val parseTry = Try(Class.forName(className))
+            if (!parseTry.isSuccess) {
+              unexpectedProtoClassNameCounter.increment()
+              logger.error("Could not find class while deserializing SamplesScannedConfig: " +
+                className, parseTry.failed.get)
+            }
+            parseTry.isSuccess
+          }
+          .map { case (className, mult) => Class.forName(className) -> mult.asInstanceOf[Double] }
+          .toMap,
+        config.getClassToSamplesPerPartKeyByteMap.asScala
+          .filter { case (className, _) =>
+            val parseTry = Try(Class.forName(className))
+            if (!parseTry.isSuccess) {
+              unexpectedProtoClassNameCounter.increment()
+              logger.error("Could not find class while deserializing SamplesScannedConfig: " +
+                className, parseTry.failed.get)
+            }
+            parseTry.isSuccess
+          }
+          .map { case (className, mult) => Class.forName(className) -> mult.asInstanceOf[Double] }
+          .toMap,
+        config.getDefaultSamplesPerChildRow,
+        config.getDefaultSamplesPerChildSeries,
+        config.getDefaultSamplesPerChildPartKeyByte,
+        config.getClassToSamplesPerChildRowMap.asScala
+          .filter { case (className, _) =>
+            val parseTry = Try(Class.forName(className))
+            if (!parseTry.isSuccess) {
+              unexpectedProtoClassNameCounter.increment()
+              logger.error("Could not find class while deserializing SamplesScannedConfig: " +
+                className, parseTry.failed.get)
+            }
+            parseTry.isSuccess
+          }
+          .map { case (className, mult) => Class.forName(className) -> mult.asInstanceOf[Double] }
+          .toMap,
+        config.getClassToSamplesPerChildSeriesMap.asScala
+          .filter { case (className, _) =>
+            val parseTry = Try(Class.forName(className))
+            if (!parseTry.isSuccess) {
+              unexpectedProtoClassNameCounter.increment()
+              logger.error("Could not find class while deserializing SamplesScannedConfig: " +
+                className, parseTry.failed.get)
+            }
+            parseTry.isSuccess
+          }
+          .map { case (className, mult) => Class.forName(className) -> mult.asInstanceOf[Double] }
+          .toMap,
+        config.getClassToSamplesPerChildPartKeyByteMap.asScala
+          .filter { case (className, _) =>
+            val parseTry = Try(Class.forName(className))
+            if (!parseTry.isSuccess) {
+              unexpectedProtoClassNameCounter.increment()
+              logger.error("Could not find class while deserializing SamplesScannedConfig: " +
+                className, parseTry.failed.get)
+            }
+            parseTry.isSuccess
+          }
+          .map { case (className, mult) => Class.forName(className) -> mult.asInstanceOf[Double] }
+          .toMap
+      )
+    }
+  }
+  // scalastyle:on cyclomatic.complexity
 
   // ChunkScanMethod
   implicit class ChunkScanMethodToProtoConverter(csm: filodb.core.store.ChunkScanMethod) {
@@ -1277,7 +1427,7 @@ object ProtoConverters {
       builder.setQueryId(qc.queryId)
       builder.setSubmitTime(qc.submitTime)
       builder.setPlannerParams(qc.plannerParams.toProto)
-      val javaTraceInfoMap = mapAsJavaMap(qc.traceInfo)
+      val javaTraceInfoMap = qc.traceInfo.asJava
       builder.putAllTraceInfo(javaTraceInfoMap)
       builder.build()
     }
@@ -1316,6 +1466,7 @@ object ProtoConverters {
         case ippd: InProcessPlanDispatcher => builder.setInProcessPlanDispatcher(ippd.toProto)
         case rapd: RemoteActorPlanDispatcher => builder.setRemoteActorPlanDispatcher(rapd.toProto)
         case gpd: GrpcPlanDispatcher => builder.setGrpcPlanDispatcher(gpd.toProto)
+        case fpd: SingleClusterFlightPlanDispatcher => builder.setSingleClusterFlightPlanDispatcher(fpd.toProto)
         case _ => throw new IllegalArgumentException(s"Unexpected PlanDispatcher subclass ${pd.getClass.getName}")
       }
       builder.build()
@@ -1390,6 +1541,25 @@ object ProtoConverters {
   implicit class GrpcPlanDispatcherFromProtoConverter(gpd: GrpcMultiPartitionQueryService.GrpcPlanDispatcher) {
     def fromProto: GrpcPlanDispatcher = {
       val dispatcher = GrpcPlanDispatcher(gpd.getEndpoint, gpd.getRequestTimeoutMs)
+      dispatcher
+    }
+  }
+
+  implicit class SingleClusterFlightPlanDispatcherToProtoConverter(fpd: filodb.coordinator.flight.SingleClusterFlightPlanDispatcher) {
+    def toProto(): GrpcMultiPartitionQueryService.SingleClusterFlightPlanDispatcher = {
+      val builder = GrpcMultiPartitionQueryService.SingleClusterFlightPlanDispatcher.newBuilder()
+      val planDispatcherBuilder = GrpcMultiPartitionQueryService.PlanDispatcher.newBuilder()
+      planDispatcherBuilder.setClusterName(fpd.clusterName)
+      planDispatcherBuilder.setIsLocalCall(fpd.isLocalCall)
+      builder.setPlanDispatcher(planDispatcherBuilder.build())
+      builder.setLocation(fpd.location.getUri.toString)
+      builder.build()
+    }
+  }
+
+  implicit class SingleClusterFlightPlanDispatcherFromProtoConverter(fpd: GrpcMultiPartitionQueryService.SingleClusterFlightPlanDispatcher) {
+    def fromProto: SingleClusterFlightPlanDispatcher = {
+      val dispatcher = SingleClusterFlightPlanDispatcher(new Location(fpd.getLocation), fpd.getPlanDispatcher.getClusterName)
       dispatcher
     }
   }
@@ -2436,6 +2606,29 @@ object ProtoConverters {
     }
   }
 
+  // PromQLGrpcRemoteExec
+  implicit class PromQLGrpcRemoteExecToProtoConverter(pgre: PromQLGrpcRemoteExec) {
+    def toProto(): GrpcMultiPartitionQueryService.PromQLGrpcRemoteExec = {
+      val builder = GrpcMultiPartitionQueryService.PromQLGrpcRemoteExec.newBuilder()
+      builder.setQueryEndpoint(pgre.queryEndpoint)
+      builder.setRequestTimeoutMs(pgre.requestTimeoutMs)
+      builder.setQueryContext(pgre.queryContext.toProto)
+      builder.setDispatcher(pgre.dispatcher.toPlanDispatcherContainer)
+      builder.setDataset(pgre.dataset.toProto)
+      builder.setPlannerSelector(pgre.plannerSelector)
+      builder.build()
+    }
+  }
+
+  implicit class PromQLGrpcRemoteExecFromProtoConverter(
+    pgre: GrpcMultiPartitionQueryService.PromQLGrpcRemoteExec) {
+    def fromProto(queryContext: QueryContext): PromQLGrpcRemoteExec = {
+      // Note: channel cannot be deserialized, so this is only for debugging/observability
+      throw new UnsupportedOperationException(
+        "PromQLGrpcRemoteExec cannot be deserialized from proto (channel field is not serializable)")
+    }
+  }
+
   //
   //
   // Leaf Plans
@@ -2885,7 +3078,7 @@ object ProtoConverters {
       val ep = srpe.getLeafExecPlan.getExecPlan
       val dataSchema = if (srpe.hasDataSchema) Option(srpe.getDataSchema.fromProto) else None
       val lookupRes = if (srpe.hasLookupRes) Option(srpe.getLookupRes.fromProto) else None
-      val colIds = srpe.getColIdsList.asScala.map(intgr => intgr.intValue())
+      val colIds = srpe.getColIdsList.asScala.map(intgr => intgr.intValue()).toSeq
       val leafExecPlan = srpe.getLeafExecPlan
       val execPlan = leafExecPlan.getExecPlan
       val dispatcher = execPlan.getDispatcher.fromProto
@@ -2950,7 +3143,8 @@ object ProtoConverters {
         case tsge: TimeScalarGeneratorExec => b.setTimeScalarGeneratorExec(tsge.toProto)
         case srpe: SelectRawPartitionsExec => b.setSelectRawPartitionsExec(srpe.toProto)
         case gre: GenericRemoteExec => b.setGenericRemoteExec(gre.toProto)
-        //case _ => throw new IllegalArgumentException(s"Unknown execution plan ${ep.getClass.getName}")
+        case pgre: PromQLGrpcRemoteExec => b.setPromQLGrpcRemoteExec(pgre.toProto)
+        case _ => throw new IllegalArgumentException(s"Unknown execution plan ${ep.getClass.getName}")
       }
       b.build()
     }
@@ -2969,6 +3163,8 @@ object ProtoConverters {
           pdc.getRemoteActorPlanDispatcher.fromProto
         case GrpcMultiPartitionQueryService.PlanDispatcherContainer.DispatcherCase.GRPCPLANDISPATCHER =>
           pdc.getGrpcPlanDispatcher.fromProto
+        case GrpcMultiPartitionQueryService.PlanDispatcherContainer.DispatcherCase.SINGLECLUSTERFLIGHTPLANDISPATCHER =>
+          pdc.getSingleClusterFlightPlanDispatcher.fromProto
         case GrpcMultiPartitionQueryService.PlanDispatcherContainer.DispatcherCase.DISPATCHER_NOT_SET =>
           throw new IllegalArgumentException("Invalid PlanDispatcherContainer")
       }
@@ -3008,6 +3204,7 @@ object ProtoConverters {
         case ExecPlanCase.TIMESCALARGENERATOREXEC => epc.getTimeScalarGeneratorExec.fromProto(queryContext)
         case ExecPlanCase.SELECTRAWPARTITIONSEXEC => epc.getSelectRawPartitionsExec.fromProto(queryContext)
         case ExecPlanCase.GENERICREMOTEEXEC => epc.getGenericRemoteExec.fromProto(queryContext)
+        case ExecPlanCase.PROMQLGRPCREMOTEEXEC => epc.getPromQLGrpcRemoteExec.fromProto(queryContext)
         case ExecPlanCase.EXECPLAN_NOT_SET =>
           throw new RuntimeException("Received Proto Execution Plan with null value")
       }

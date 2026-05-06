@@ -12,7 +12,7 @@ import com.typesafe.config.ConfigFactory
 import com.typesafe.scalalogging.StrictLogging
 import org.apache.arrow.flight.Location
 
-import filodb.coordinator.flight.SingleClusterFlightPlanDispatcher
+import filodb.coordinator.flight.FlightPlanDispatcher
 import filodb.core.downsample.{CounterDownsamplePeriodMarker, TimeDownsamplePeriodMarker}
 import filodb.core.memstore.PartLookupResult
 import filodb.core.metadata.{ComputedColumn, DataColumn}
@@ -68,6 +68,7 @@ object ProtoConverters extends StrictLogging {
       builder.setAllowPartialResultsRangeQuery(qc.allowPartialResultsRangeQuery)
       builder.setAllowPartialResultsMetadataQuery(qc.allowPartialResultsMetadataQuery)
       builder.addAllGrpcPartitionsDenyList(qc.grpcPartitionsDenyList.asJava)
+      builder.addAllFlightPartitionsDenyList(qc.flightPartitionsDenyList.asJava)
       qc.plannerSelector.foreach(plannerSelector => builder.setPlannerSelector(plannerSelector))
       qc.recordContainerOverrides.foreach(overrides => builder.putRecordContainerOverrides(overrides._1, overrides._2))
       builder.setSamplesScannedConfig(qc.samplesScannedConfig.toProto)
@@ -96,6 +97,7 @@ object ProtoConverters extends StrictLogging {
         qc.getAllowPartialResultsRangeQuery(),
         qc.getAllowPartialResultsMetadataQuery(),
         qc.getGrpcPartitionsDenyListList().asScala.toSet,
+        qc.getFlightPartitionsDenyListList().asScala.toSet,
         if (qc.hasPlannerSelector) Option(qc.getPlannerSelector()) else None,
         rcoIntMap,
         samplesScannedConfig =
@@ -1466,7 +1468,7 @@ object ProtoConverters extends StrictLogging {
         case ippd: InProcessPlanDispatcher => builder.setInProcessPlanDispatcher(ippd.toProto)
         case rapd: RemoteActorPlanDispatcher => builder.setRemoteActorPlanDispatcher(rapd.toProto)
         case gpd: GrpcPlanDispatcher => builder.setGrpcPlanDispatcher(gpd.toProto)
-        case fpd: SingleClusterFlightPlanDispatcher => builder.setSingleClusterFlightPlanDispatcher(fpd.toProto)
+        case fpd: FlightPlanDispatcher => builder.setSingleClusterFlightPlanDispatcher(fpd.toProto)
         case _ => throw new IllegalArgumentException(s"Unexpected PlanDispatcher subclass ${pd.getClass.getName}")
       }
       builder.build()
@@ -1545,7 +1547,7 @@ object ProtoConverters extends StrictLogging {
     }
   }
 
-  implicit class SingleClusterFlightPlanDispatcherToProtoConverter(fpd: filodb.coordinator.flight.SingleClusterFlightPlanDispatcher) {
+  implicit class SingleClusterFlightPlanDispatcherToProtoConverter(fpd: filodb.coordinator.flight.FlightPlanDispatcher) {
     def toProto(): GrpcMultiPartitionQueryService.SingleClusterFlightPlanDispatcher = {
       val builder = GrpcMultiPartitionQueryService.SingleClusterFlightPlanDispatcher.newBuilder()
       val planDispatcherBuilder = GrpcMultiPartitionQueryService.PlanDispatcher.newBuilder()
@@ -1558,8 +1560,8 @@ object ProtoConverters extends StrictLogging {
   }
 
   implicit class SingleClusterFlightPlanDispatcherFromProtoConverter(fpd: GrpcMultiPartitionQueryService.SingleClusterFlightPlanDispatcher) {
-    def fromProto: SingleClusterFlightPlanDispatcher = {
-      val dispatcher = SingleClusterFlightPlanDispatcher(new Location(fpd.getLocation), fpd.getPlanDispatcher.getClusterName)
+    def fromProto: FlightPlanDispatcher = {
+      val dispatcher = FlightPlanDispatcher(new Location(fpd.getLocation), fpd.getPlanDispatcher.getClusterName)
       dispatcher
     }
   }

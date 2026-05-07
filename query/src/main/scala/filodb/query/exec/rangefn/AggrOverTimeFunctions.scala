@@ -73,9 +73,15 @@ class MinOverTimeChunkedFunctionD(var min: Double = Double.NaN,
     while (rowNum <= endRowNum) {
       val nextVal = it.next
       val nextTimestamp = tsReader(tsVectorAcc, tsVector, rowNum)
-      val (resultValue, resultTimestamp) = QueryUtils.minIgnoreNaN(min, minTimestamp, nextVal, nextTimestamp)
-      min = resultValue
-      minTimestamp = resultTimestamp
+      // Handle NaN values properly for timestamp functions
+      if (min != min) { // min is NaN
+        min = nextVal
+        minTimestamp = nextTimestamp
+      } else if (nextVal != nextVal) { // nextVal is NaN, keep current min
+      } else if (nextVal <= min) {
+        min = nextVal
+        minTimestamp = nextTimestamp
+      }
       rowNum += 1
     }
   }
@@ -152,9 +158,15 @@ class MaxOverTimeChunkedFunctionD(var max: Double = Double.NaN,
     while (rowNum <= endRowNum) {
       val nextVal = it.next
       val nextTimestamp = tsReader(tsVectorAcc, tsVector, rowNum)
-      val (resultValue, resultTimestamp) = QueryUtils.maxIgnoreNaN(max, maxTimestamp, nextVal, nextTimestamp)
-      max = resultValue
-      maxTimestamp = resultTimestamp
+      // Handle NaN values properly for timestamp functions
+      if (max != max) { // max is NaN
+        max = nextVal
+        maxTimestamp = nextTimestamp
+      } else if (nextVal != nextVal) { // nextVal is NaN, keep current max
+      } else if (nextVal >= max) {
+        max = nextVal
+        maxTimestamp = nextTimestamp
+      }
       rowNum += 1
     }
   }

@@ -736,9 +736,12 @@ class LastSampleChunkedFunctionD(val emitTimestamp: Boolean = false) extends Las
 
     timestamp = ts
     if (emitTimestamp) {
-      // For timestamp functions, use helper to handle NaN values properly
-      val (_, resultTimestamp) = QueryUtils.lastIgnoreNaN(value, timestamp, doubleVal, ts)
-      value = resultTimestamp.toDouble / 1000.0
+      // For timestamp functions, handle NaN values properly - ignore NaN values and find last non-NaN
+      if (doubleVal != doubleVal) { // doubleVal is NaN, keep current timestamp
+        value = timestamp.toDouble / 1000.0
+      } else { // doubleVal is not NaN, use new timestamp
+        value = ts.toDouble / 1000.0
+      }
     } else {
       // Respect Prometheus staleness: if the last value is NaN (stale marker),
       // propagate it so the series is correctly reported as stale.

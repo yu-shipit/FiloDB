@@ -7,8 +7,6 @@ import "range_vector.proto";
 option java_outer_classname = "GrpcMultiPartitionQueryService";
 option java_generate_equals_and_hash = true;
 
-
-
 message QueryParams {
       uint64 start                         = 1;
       uint64 end                           = 2;
@@ -80,6 +78,7 @@ message Request {
       PlannerParams plannerParams   = 2;
       string dataset                = 3;
       string plannerSelector        = 4;
+      optional string flightResponseAcceptVersion = 5;
 }
 
 message StreamingErrorResponse {
@@ -456,6 +455,7 @@ message QueryConfig {
   optional string plannerSelector            = 17;
   map<string,int32> recordContainerOverrides = 18;
   SamplesScannedConfig samplesScannedConfig  = 19;
+  repeated string flightPartitionsDenyList   = 20;
 }
 
 enum ChunkScanType {
@@ -679,6 +679,9 @@ enum InternalRangeFunction {
   MEDIAN_ABSOLUTE_DEVIATION_OVER_TIME = 28;
   RATE_AND_MIN_MAX_OVER_TIME = 29;
   LAST_OVER_TIME_IS_MAD_OUTLIER = 30;
+  TS_OF_MAX_OVER_TIME   = 31;
+  TS_OF_MIN_OVER_TIME   = 32;
+  TS_OF_LAST_OVER_TIME = 33;
 }
 
 enum SortFunctionId {

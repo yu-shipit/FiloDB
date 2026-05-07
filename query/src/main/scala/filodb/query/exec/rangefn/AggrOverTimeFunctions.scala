@@ -54,7 +54,7 @@ class MinOverTimeChunkedFunctionD(var min: Double = Double.NaN,
   final def apply(endTimestamp: Long, sampleToEmit: TransientRow): Unit = {
     sampleToEmit.setValues(endTimestamp,
       if (emitTimestamp) {
-        if (minTimestamp >= 0) minTimestamp.toDouble / 1000.0 else Double.NaN
+        if (!min.isNaN) minTimestamp.toDouble / 1000.0 else Double.NaN
       } else {
         min
       })
@@ -116,7 +116,7 @@ class MinOverTimeChunkedFunctionL(var min: Long = Long.MaxValue,
     val it = longReader.iterate(longVectAcc, longVect, startRowNum)
     while (rowNum <= endRowNum) {
       val nextVal = it.next
-      if (min == Long.MaxValue || nextVal < min) {
+      if (min == Long.MaxValue || nextVal <= min) {
         min = nextVal
         if (emitTimestamp) {
           minTimestamp = tsReader(tsVectorAcc, tsVector, rowNum)
@@ -139,7 +139,7 @@ class MaxOverTimeChunkedFunctionD(var max: Double = Double.NaN,
   final def apply(endTimestamp: Long, sampleToEmit: TransientRow): Unit = {
     sampleToEmit.setValues(endTimestamp,
       if (emitTimestamp) {
-        if (maxTimestamp >= 0) maxTimestamp.toDouble / 1000.0 else Double.NaN
+        if (!max.isNaN) maxTimestamp.toDouble / 1000.0 else Double.NaN
       } else {
         max
       })

@@ -2,8 +2,9 @@ package filodb.query.exec.rangefn
 
 import spire.syntax.cfor._
 
+import filodb.core.metadata.Schema
 import filodb.core.query.{QueryConfig, TransientHistRow, TransientRow}
-import filodb.memory.format.{ vectors => bv, BinaryVector, CounterVectorReader, MemoryReader, VectorDataReader}
+import filodb.memory.format.{vectors => bv, BinaryVector, CounterVectorReader, MemoryReader, VectorDataReader}
 import filodb.memory.format.BinaryVector.BinaryVectorPtr
 import filodb.memory.format.vectors.{Base2ExpHistogramBuckets, MutableHistogram}
 import filodb.query.exec.FiloQueryConfig
@@ -266,7 +267,7 @@ abstract class ChunkedRateFunctionBase extends CounterChunkedRangeFunction[Trans
     }
   }
 
-  override def apply(windowStart: Long, windowEnd: Long, sampleToEmit: TransientRow): Unit = {
+  override def apply(schema: Schema, windowStart: Long, windowEnd: Long, sampleToEmit: TransientRow): Unit = {
     if (highestTime > lowestTime) {
       // NOTE: It seems in order to match previous code, we have to adjust the windowStart by -1 so it's "inclusive"
       val curWindowStart = if (FiloQueryConfig.isInclusiveRange)
@@ -363,7 +364,7 @@ abstract class HistogramRateFunctionBase extends CounterChunkedRangeFunction[Tra
     case other: CounterVectorReader =>
   }
 
-  override def apply(windowStart: Long, windowEnd: Long, sampleToEmit: TransientHistRow): Unit = {
+  override def apply(schema: Schema, windowStart: Long, windowEnd: Long, sampleToEmit: TransientHistRow): Unit = {
     if (highestTime > lowestTime) {
       // NOTE: It seems in order to match previous code, we have to adjust the windowStart by -1 so it's "inclusive"
       // TODO: handle case where schemas are different and we need to interpolate schemas
@@ -425,14 +426,18 @@ class RateOverDeltaChunkedFunctionD extends ChunkedDoubleRangeFunction {
   private val sumFunc = new SumOverTimeChunkedFunctionD
   override final def reset(): Unit = {sumFunc.reset() }
 
-  final def addTimeDoubleChunks(doubleVectAcc: MemoryReader,
-                                doubleVect: BinaryVector.BinaryVectorPtr,
-                                doubleReader: bv.DoubleVectorDataReader,
-                                startRowNum: Int,
-                                endRowNum: Int): Unit =
-    sumFunc.addTimeDoubleChunks(doubleVectAcc, doubleVect, doubleReader, startRowNum, endRowNum)
+  final def addTimeDoubleChunksWithTimestamp(tsVectorAcc: MemoryReader,
+                                             tsVector: BinaryVectorPtr,
+                                             tsReader: bv.LongVectorDataReader,
+                                             doubleVectAcc: MemoryReader,
+                                             doubleVect: BinaryVector.BinaryVectorPtr,
+                                             doubleReader: bv.DoubleVectorDataReader,
+                                             startRowNum: Int,
+                                             endRowNum: Int): Unit =
+    sumFunc.addTimeDoubleChunksWithTimestamp(tsVectorAcc, tsVector, tsReader,
+      doubleVectAcc, doubleVect, doubleReader, startRowNum, endRowNum)
 
-  override def apply(windowStart: Long, windowEnd: Long, sampleToEmit: TransientRow): Unit = {
+  override def apply(schema: Schema, windowStart: Long, windowEnd: Long, sampleToEmit: TransientRow): Unit = {
     val curWindowStart = if (FiloQueryConfig.isInclusiveRange)
                             windowStart
                          else
@@ -448,14 +453,18 @@ class RateOverDeltaChunkedFunctionL extends ChunkedLongRangeFunction {
 
   override final def reset(): Unit = sumFunc.reset()
 
-  final def addTimeLongChunks(longVectAcc: MemoryReader,
-                              longVect: BinaryVector.BinaryVectorPtr,
-                              longReader: bv.LongVectorDataReader,
-                              startRowNum: Int,
-                              endRowNum: Int): Unit =
-    sumFunc.addTimeChunks(longVectAcc, longVect, longReader, startRowNum, endRowNum)
+  final def addTimeLongChunksWithTimestamp(tsVectorAcc: MemoryReader,
+                                           tsVector: BinaryVectorPtr,
+                                           tsReader: bv.LongVectorDataReader,
+                                           longVectAcc: MemoryReader,
+                                           longVect: BinaryVector.BinaryVectorPtr,
+                                           longReader: bv.LongVectorDataReader,
+                                           startRowNum: Int,
+                                           endRowNum: Int): Unit =
+    sumFunc.addTimeLongChunksWithTimestamp(tsVectorAcc, tsVector, tsReader,
+      longVectAcc, longVect, longReader, startRowNum, endRowNum)
 
-  override def apply(windowStart: Long, windowEnd: Long, sampleToEmit: TransientRow): Unit = {
+  override def apply(schema: Schema, windowStart: Long, windowEnd: Long, sampleToEmit: TransientRow): Unit = {
     val curWindowStart = if (FiloQueryConfig.isInclusiveRange)
                             windowStart
                          else
@@ -472,7 +481,7 @@ class RateOverDeltaChunkedFunctionH(var h: bv.MutableHistogram = bv.Histogram.em
   private val hFunc = new SumOverTimeChunkedFunctionH
   override final def reset(): Unit = hFunc.reset()
 
-  override def apply(windowStart: Long, windowEnd: Long, sampleToEmit: TransientHistRow): Unit = {
+  override def apply(schema: Schema, windowStart: Long, windowEnd: Long, sampleToEmit: TransientHistRow): Unit = {
     val rateArray = new Array[Double](hFunc.h.numBuckets)
     cforRange {
       0 until rateArray.size
@@ -482,12 +491,15 @@ class RateOverDeltaChunkedFunctionH(var h: bv.MutableHistogram = bv.Histogram.em
     sampleToEmit.setValues(windowEnd, bv.MutableHistogram(hFunc.h.buckets, rateArray))
   }
 
-  final def addTimeChunks(vectAcc: MemoryReader,
-                          vectPtr: BinaryVector.BinaryVectorPtr,
-                          reader: VectorDataReader,
-                          startRowNum: Int,
-                          endRowNum: Int): Unit =
-    hFunc.addTimeChunks(vectAcc, vectPtr, reader, startRowNum, endRowNum)
+  final def addTimeChunksWithTimestamp(tsVectorAcc: MemoryReader,
+                                       tsVector: BinaryVectorPtr,
+                                       tsReader: bv.LongVectorDataReader,
+                                       vectAcc: MemoryReader,
+                                       vectPtr: BinaryVector.BinaryVectorPtr,
+                                       reader: VectorDataReader,
+                                       startRowNum: Int,
+                                       endRowNum: Int): Unit =
+    hFunc.addTimeChunksWithTimestamp(tsVectorAcc, tsVector, tsReader, vectAcc, vectPtr, reader, startRowNum, endRowNum)
 
   def apply(endTimestamp: Long, sampleToEmit: TransientHistRow): Unit = ???
 }

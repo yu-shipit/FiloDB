@@ -24,7 +24,10 @@ import filodb.query.Query.qLogger
   */
 case class InProcessPlanDispatcher(queryConfig: QueryConfig) extends PlanDispatcher {
 
+  import InProcessPlanDispatcher._
+
   val clusterName = InetAddress.getLocalHost().getHostName()
+  lazy val partition = extractPartition(clusterName)
 
   override def dispatch(plan: ExecPlanWithClientParams,
                         source: ChunkSource)(implicit sched: Scheduler): Task[QueryResponse] = {
@@ -40,10 +43,12 @@ case class InProcessPlanDispatcher(queryConfig: QueryConfig) extends PlanDispatc
       val querySession = QuerySession(plan.execPlan.queryContext, queryConfig,
                               streamingDispatch = PlanDispatcher.streamingResultsEnabled,
                               catchMultipleLockSetErrors = true,
+                              flightAllocator = plan.querySession.flightAllocator,
                               preventRangeVectorSerialization = plan.clientParams.preventRangeVectorSerialization)
       plan.execPlan.execute(source, querySession)
         .timeout(plan.clientParams.deadlineMs.milliseconds)
-        .guarantee(Task.eval(querySession.close()))
+        // skip closing flight allocator since it is owned by caller and simply passed down
+        .guarantee(Task.eval(querySession.close(skipAllocatorClose = true)))
         .onErrorRecoverWith {
         case e: TimeoutException =>
          qLogger.error(s"TimeoutException for query id: ${plan.execPlan.queryContext.queryId}: ${e.getMessage}")
@@ -52,7 +57,8 @@ case class InProcessPlanDispatcher(queryConfig: QueryConfig) extends PlanDispatc
               "dispatcher" -> "in-process",
               "dataset" -> plan.execPlan.dataset.dataset,
               "cluster" -> clusterName,
-              "query_type" -> plan.execPlan.getClass.getSimpleName))
+              "query_type" -> plan.execPlan.getClass.getSimpleName,
+              "partition" -> partition))
          if (plan.execPlan.queryContext.plannerParams.allowPartialResults) {
            qLogger.warn(s"Swallowed TimeoutException for query id: ${plan.execPlan.queryContext.queryId} " +
              s"since partial result was enabled: ${e.getMessage}")
@@ -64,11 +70,23 @@ case class InProcessPlanDispatcher(queryConfig: QueryConfig) extends PlanDispatc
     }
   }
 
+  private def extractPartition(hostname: String): String = {
+
+    hostname match {
+      case partitionPattern(partition) => partition
+      case _ => hostname
+    }
+  }
+
   override def isLocalCall: Boolean = true
 
   override def dispatchStreaming(plan: ExecPlanWithClientParams,
                                  source: ChunkSource)
                                 (implicit sched: Scheduler): Observable[StreamQueryResponse] = ???
+}
+
+object InProcessPlanDispatcher {
+  private val partitionPattern = """.*?(tsdb\d+).*""".r
 }
 
 /**

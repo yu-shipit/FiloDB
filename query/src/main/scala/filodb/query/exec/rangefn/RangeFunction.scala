@@ -98,18 +98,25 @@ trait ChunkedRangeFunction[R <: MutableRowReader] extends BaseRangeFunction {
    * @param endTime ending timestamp in millis since Epoch for time window, inclusive
    */
   // scalastyle:off parameter.number
-  def addChunks(tsVectorAcc: MemoryReader, tsVector: BinaryVectorPtr, tsReader: bv.LongVectorDataReader,
+  def addChunks(schema: Schema, tsVectorAcc: MemoryReader, tsVector: BinaryVectorPtr, tsReader: bv.LongVectorDataReader,
                 valueVectorAcc: MemoryReader, valueVector: BinaryVectorPtr, valueReader: VectorDataReader,
                 startTime: Long, endTime: Long, info: ChunkSetInfoReader, queryConfig: QueryConfig): Unit
 
   /**
    * Return the computed result in sampleToEmit for the given window.
+   * Currently only rate based functions override this method, but it is provided with the windowStart
+   * and windowEnd if needed for more complex computations.
    */
-  def apply(windowStart: Long, windowEnd: Long, sampleToEmit: R): Unit =
+  def apply(schema: Schema, windowStart: Long, windowEnd: Long, sampleToEmit: R): Unit =
     apply(windowEnd, sampleToEmit)
 
   /**
-   * Return the computed result in the sampleToEmit
+   * Return the computed result in the sampleToEmit.
+   * Called (currently) only from the above apply method. Most implementations
+   * override this method since they don't care much about windowStart and just want to emit a value for
+   * the window ending at endTimestamp.  But the windowStart is provided if needed for more complex computations.
+   * Rate/Increase implementations do not care about this method since they override the above apply method.
+   *
    * @param endTimestamp the ending timestamp of the current window
    */
   def apply(endTimestamp: Long, sampleToEmit: R): Unit
@@ -128,7 +135,7 @@ trait CounterChunkedRangeFunction[R <: MutableRowReader] extends ChunkedRangeFun
   override def reset(): Unit = { correctionMeta = NoCorrection }
 
   // scalastyle:off parameter.number
-  def addChunks(tsVectorAcc: MemoryReader, tsVector: BinaryVectorPtr, tsReader: bv.LongVectorDataReader,
+  def addChunks(schema: Schema, tsVectorAcc: MemoryReader, tsVector: BinaryVectorPtr, tsReader: bv.LongVectorDataReader,
                 valueVectorAcc: MemoryReader, valueVector: BinaryVectorPtr, valueReader: VectorDataReader,
                 startTime: Long, endTime: Long, info: ChunkSetInfoReader, queryConfig: QueryConfig): Unit = {
     val ccReader = valueReader.asInstanceOf[CounterVectorReader]
@@ -170,7 +177,7 @@ trait CounterChunkedRangeFunction[R <: MutableRowReader] extends ChunkedRangeFun
  */
 trait TimeRangeFunction[R <: MutableRowReader] extends ChunkedRangeFunction[R] {
   // scalastyle:off parameter.number
-  def addChunks(tsVectorAcc: MemoryReader, tsVector: BinaryVectorPtr, tsReader: bv.LongVectorDataReader,
+  def addChunks(schema: Schema, tsVectorAcc: MemoryReader, tsVector: BinaryVectorPtr, tsReader: bv.LongVectorDataReader,
                 valueVectorAcc: MemoryReader, valueVector: BinaryVectorPtr, valueReader: VectorDataReader,
                 startTime: Long, endTime: Long, info: ChunkSetInfoReader, queryConfig: QueryConfig): Unit = {
     // TODO: abstract this pattern of start/end row # out. Probably when cursors are implemented
@@ -180,14 +187,22 @@ trait TimeRangeFunction[R <: MutableRowReader] extends ChunkedRangeFunction[R] {
 
     // At least one sample is present
     if (startRowNum <= endRowNum)
-      addTimeChunks(valueVectorAcc, valueVector, valueReader, startRowNum, endRowNum)
+      addTimeChunksWithTimestamp(tsVectorAcc, tsVector, tsReader,
+        valueVectorAcc, valueVector, valueReader, startRowNum, endRowNum)
   }
 
-  def addTimeChunks(vectAcc: MemoryReader,
-                    vectPtr: BinaryVector.BinaryVectorPtr,
-                    reader: VectorDataReader,
-                    startRowNum: Int,
-                    endRowNum: Int): Unit
+  /**
+   * Enhanced addTimeChunks method that provides access to both timestamp and value vectors.
+   * This is the primary method that implementations should override.
+   */
+  def addTimeChunksWithTimestamp(tsVectorAcc: MemoryReader,
+                                 tsVector: BinaryVectorPtr,
+                                 tsReader: bv.LongVectorDataReader,
+                                 vectAcc: MemoryReader,
+                                 vectPtr: BinaryVector.BinaryVectorPtr,
+                                 reader: VectorDataReader,
+                                 startRowNum: Int,
+                                 endRowNum: Int): Unit
 }
 
 /**
@@ -195,43 +210,68 @@ trait TimeRangeFunction[R <: MutableRowReader] extends ChunkedRangeFunction[R] {
  * and returning the double value vector and reader with the row numbers
  */
 trait ChunkedDoubleRangeFunction extends TimeRangeFunction[TransientRow] {
-  final def addTimeChunks(vectAcc: MemoryReader,
-                          vectPtr: BinaryVector.BinaryVectorPtr,
-                          reader: VectorDataReader,
-                          startRowNum: Int,
-                          endRowNum: Int): Unit =
-    addTimeDoubleChunks(vectAcc, vectPtr, reader.asDoubleReader, startRowNum, endRowNum)
 
   /**
-   * Add a Double BinaryVector in the range (startRowNum, endRowNum) to the range computation
-   * @param startRowNum the row number for timestamp greater than or equal to startTime
-   * @param endRowNum the row number with the timestamp <= endTime
+   * Override to provide timestamp access to double functions that need it.
+   * Default implementation delegates to addTimeDoubleChunks (ignoring timestamps).
    */
-  def addTimeDoubleChunks(doubleVectAcc: MemoryReader,
-                          doubleVect: BinaryVector.BinaryVectorPtr,
-                          doubleReader: bv.DoubleVectorDataReader,
-                          startRowNum: Int,
-                          endRowNum: Int): Unit
+  final override def addTimeChunksWithTimestamp(tsVectorAcc: MemoryReader,
+                                          tsVector: BinaryVectorPtr,
+                                          tsReader: bv.LongVectorDataReader,
+                                          vectAcc: MemoryReader,
+                                          vectPtr: BinaryVector.BinaryVectorPtr,
+                                          reader: VectorDataReader,
+                                          startRowNum: Int,
+                                          endRowNum: Int): Unit = {
+    addTimeDoubleChunksWithTimestamp(tsVectorAcc, tsVector, tsReader,
+      vectAcc, vectPtr, reader.asDoubleReader, startRowNum, endRowNum)
+  }
+
+  /**
+   * Enhanced method that provides access to both timestamp and value vectors for double functions.
+   * This is the primary method that implementations should override.
+   */
+  def addTimeDoubleChunksWithTimestamp(tsVectorAcc: MemoryReader,
+                                       tsVector: BinaryVectorPtr,
+                                       tsReader: bv.LongVectorDataReader,
+                                       doubleVectAcc: MemoryReader,
+                                       doubleVect: BinaryVector.BinaryVectorPtr,
+                                       doubleReader: bv.DoubleVectorDataReader,
+                                       startRowNum: Int,
+                                       endRowNum: Int): Unit
 }
 
 trait ChunkedLongRangeFunction extends TimeRangeFunction[TransientRow] {
-  final def addTimeChunks(vectAcc: MemoryReader,
-                          vectPtr: BinaryVector.BinaryVectorPtr,
-                          reader: VectorDataReader,
-                          startRowNum: Int,
-                          endRowNum: Int): Unit =
-    addTimeLongChunks(vectAcc, vectPtr, reader.asLongReader, startRowNum, endRowNum)
 
   /**
-   * Add a Long BinaryVector in the range (startRowNum, endRowNum) to the range computation
-   * @param startRowNum the row number for timestamp greater than or equal to startTime
-   * @param endRowNum the row number with the timestamp <= endTime
+   * Override to provide timestamp access to long functions that need it.
+   * Default implementation delegates to addTimeLongChunks (ignoring timestamps).
    */
-  def addTimeLongChunks(longVectAcc: MemoryReader,
-                        longVect: BinaryVector.BinaryVectorPtr,
-                        longReader: bv.LongVectorDataReader,
-                        startRowNum: Int,
-                        endRowNum: Int): Unit
+  final override def addTimeChunksWithTimestamp(tsVectorAcc: MemoryReader,
+                                                tsVector: BinaryVectorPtr,
+                                                tsReader: bv.LongVectorDataReader,
+                                                vectAcc: MemoryReader,
+                                                vectPtr: BinaryVector.BinaryVectorPtr,
+                                                reader: VectorDataReader,
+                                                startRowNum: Int,
+                                                endRowNum: Int): Unit = {
+    addTimeLongChunksWithTimestamp(tsVectorAcc, tsVector, tsReader,
+      vectAcc, vectPtr, reader.asLongReader, startRowNum, endRowNum)
+  }
+
+  /**
+   * Enhanced method that provides access to both timestamp and value vectors for long functions.
+   * This is the primary method that implementations should override.
+   */
+  def addTimeLongChunksWithTimestamp(tsVectorAcc: MemoryReader,
+                                     tsVector: BinaryVectorPtr,
+                                     tsReader: bv.LongVectorDataReader,
+                                     longVectAcc: MemoryReader,
+                                     longVect: BinaryVector.BinaryVectorPtr,
+                                     longReader: bv.LongVectorDataReader,
+                                     startRowNum: Int,
+                                     endRowNum: Int): Unit
+
 }
 
 object RangeFunction {
@@ -320,6 +360,9 @@ object RangeFunction {
       case Some(AvgOverTime)                      => () => new AvgOverTimeChunkedFunctionL
       case Some(MinOverTime)                      => () => new MinOverTimeChunkedFunctionL
       case Some(MaxOverTime)                      => () => new MaxOverTimeChunkedFunctionL
+      case Some(TsOfMinOverTime)                  => () => new MinOverTimeChunkedFunctionL(emitTimestamp = true)
+      case Some(TsOfMaxOverTime)                  => () => new MaxOverTimeChunkedFunctionL(emitTimestamp = true)
+      case Some(TsOfLastOverTime)                 => () => new LastSampleChunkedFunctionL(emitTimestamp = true)
       case Some(StdDevOverTime)                   => () => new StdDevOverTimeChunkedFunctionL
       case Some(StdVarOverTime)                   => () => new StdVarOverTimeChunkedFunctionL
       case Some(Changes)                          => () => new ChangesChunkedFunctionL
@@ -342,23 +385,23 @@ object RangeFunction {
     func match {
       case None                                   => () => new LastSampleChunkedFunctionD
       case Some(Last)                             => () => new LastSampleChunkedFunctionD
-      case Some(Increase) if config.fasterRateEnabled && schema.columns(1).isCumulative
-                                                  => () => new ChunkedIncreaseFunction
-      case Some(Rate) if config.fasterRateEnabled && schema.columns(1).isCumulative
-                                                  => () => new ChunkedRateFunction
-      case Some(Increase) if !schema.columns(1).isCumulative
-                                                  => () => new SumOverTimeChunkedFunctionD
-      case Some(Rate)     if !schema.columns(1).isCumulative
-                                                  => () => new RateOverDeltaChunkedFunctionD
-
+      case Some(Increase)                         => () => new CumlDeltaTogglerChunkedFunction(
+                                                                                     new ChunkedIncreaseFunction,
+                                                                                     new SumOverTimeChunkedFunctionD)
+      case Some(Rate)                             => () => new CumlDeltaTogglerChunkedFunction(
+                                                                                     new ChunkedRateFunction,
+                                                                                     new RateOverDeltaChunkedFunctionD)
       case Some(CountOverTime)                    => () => new CountOverTimeChunkedFunctionD()
       case Some(SumOverTime)                      => () => new SumOverTimeChunkedFunctionD
       case Some(AvgWithSumAndCountOverTime)
                                                   => require(schema.columns(2).name == "count")
-                                     () => new AvgWithSumAndCountOverTimeFuncD(schema.colIDs(2))
+                                                     () => new AvgWithSumAndCountOverTimeFuncD(schema.colIDs(2))
       case Some(AvgOverTime)                      => () => new AvgOverTimeChunkedFunctionD
       case Some(MinOverTime)                      => () => new MinOverTimeChunkedFunctionD
       case Some(MaxOverTime)                      => () => new MaxOverTimeChunkedFunctionD
+      case Some(TsOfMinOverTime)                  => () => new MinOverTimeChunkedFunctionD(emitTimestamp = true)
+      case Some(TsOfMaxOverTime)                  => () => new MaxOverTimeChunkedFunctionD(emitTimestamp = true)
+      case Some(TsOfLastOverTime)                 => () => new LastSampleChunkedFunctionD(emitTimestamp = true)
       case Some(StdDevOverTime)                   => () => new StdDevOverTimeChunkedFunctionD
       case Some(StdVarOverTime)                   => () => new StdVarOverTimeChunkedFunctionD
       case Some(Changes)                          => () => new ChangesChunkedFunctionD()
@@ -390,20 +433,17 @@ object RangeFunction {
                                  () => new LastSampleChunkedFunctionHMax(schema.colIDs(2), schema.colIDs(3))
     case Some(SumAndMaxOverTime) => require(schema.columns(2).name == "max")
                                  () => new SumAndMaxOverTimeFuncHD(schema.colIDs(2))
-    case Some(RateAndMinMaxOverTime) if schema.columns(1).isCumulative =>
+    case Some(RateAndMinMaxOverTime) =>
                                  require(schema.columns(2).name == "max" && schema.columns(3).name == "min")
-                                 () => new CumulativeHistRateAndMinMaxFunction(schema.colIDs(2), schema.colIDs(3))
-    case Some(RateAndMinMaxOverTime) if !schema.columns(1).isCumulative =>
-                                 require(schema.columns(2).name == "max" && schema.columns(3).name == "min")
-                                 () => new DeltaRateAndMinMaxOverTimeFuncHD(schema.colIDs(2), schema.colIDs(3))
+                                 () => new CumlDeltaTogglerChunkedFunction(
+                                   new CumulativeHistRateAndMinMaxFunction(schema.colIDs(2), schema.colIDs(3)),
+                                   new DeltaRateAndMinMaxOverTimeFuncHD(schema.colIDs(2), schema.colIDs(3)))
     case Some(Last)           => () => new LastSampleChunkedFunctionH
     case Some(SumOverTime)    => () => new SumOverTimeChunkedFunctionH
-    case Some(Rate) if schema.columns(1).isCumulative
-                              => () => new HistRateFunction
-    case Some(Increase) if schema.columns(1).isCumulative
-                              => () => new HistIncreaseFunction
-    case Some(Rate)           => () => new RateOverDeltaChunkedFunctionH
-    case Some(Increase)       => () => new SumOverTimeChunkedFunctionH
+    case Some(Rate)           => () => new CumlDeltaTogglerChunkedFunction(new HistRateFunction,
+                                                                           new RateOverDeltaChunkedFunctionH)
+    case Some(Increase)       => () => new CumlDeltaTogglerChunkedFunction(new HistIncreaseFunction,
+                                                                           new SumOverTimeChunkedFunctionH)
     case Some(x)              => throw new NotImplementedError(
                                 s"${x.toString} not implemented for histogram chunked functions")
   }
@@ -493,6 +533,11 @@ object RangeFunction {
     case Some(Deriv)                            => () => DerivFunction
     case Some(MaxOverTime)                      => () => new MinMaxOverTimeFunction(Ordering[Double])
     case Some(MinOverTime)                      => () => new MinMaxOverTimeFunction(Ordering[Double].reverse)
+    case Some(TsOfMaxOverTime)                  => () =>
+      new MinMaxOverTimeFunction(Ordering[Double], emitTimestamp = true)
+    case Some(TsOfMinOverTime)                  => () =>
+      new MinMaxOverTimeFunction(Ordering[Double].reverse, emitTimestamp = true)
+    case Some(TsOfLastOverTime)                 => () => new LastSampleFunction(emitTimestamp = true)
     case Some(CountOverTime)                    => () => new CountOverTimeFunction()
     case Some(SumOverTime)                      => () => new SumOverTimeFunction()
     case Some(AvgOverTime)                      => () => new AvgOverTimeFunction()
@@ -502,6 +547,8 @@ object RangeFunction {
     case Some(QuantileOverTime)                 => () => new QuantileOverTimeFunction(funcParams)
     case Some(MedianAbsoluteDeviationOverTime)  => () => new MedianAbsoluteDeviationOverTimeFunction(funcParams)
     case Some(LastOverTimeIsMadOutlier)         => () => new LastOverTimeIsMadOutlierFunction(funcParams)
+    case Some(PredictLinear)                    => () => new PredictLinearFunction(funcParams)
+    case Some(Timestamp)                        => () => new TimestampIteratingFunction()
   }
 }
 
@@ -533,7 +580,15 @@ class LastSampleFunctionH(val isMinMaxHistogram: Boolean = false) extends RangeF
   }
 }
 
-object LastSampleFunction extends RangeFunction[TransientRow] {
+/**
+ * IMPORTANT GOTCHA:
+ * LastSampleFunction does not behave like LastSampleChunkedFunctionD in NaN handling.  LastSampleFunction will return
+ * the last non-NaN sample in the window, while LastSampleChunkedFunctionD will return NaN if the last sample in the
+ * chunk is NaN, even if there are non-NaN samples before it.  This is because LastSampleFunction is designed to
+ * answer sub-queries which require the last non-NaN sample in the window, while LastSampleChunkedFunctionD is designed
+ * raw data queries which can have the staleness sample marker.
+ */
+class LastSampleFunction(val emitTimestamp: Boolean = false) extends RangeFunction[TransientRow] {
   def addedToWindow(row: TransientRow, window: Window[TransientRow]): Unit = {}
   def removedFromWindow(row: TransientRow, window: Window[TransientRow]): Unit = {}
   def apply(startTimestamp: Long,
@@ -544,12 +599,39 @@ object LastSampleFunction extends RangeFunction[TransientRow] {
     for (i <- (window.size - 1) to 0 by -1) {
       val row = window.apply(i)
       val rowValue = row.getDouble(1)
-      if (!rowValue.isNaN ) {
-        sampleToEmit.setValues(endTimestamp, rowValue)
+      if (!rowValue.isNaN) {
+        sampleToEmit.setValues(endTimestamp, if (emitTimestamp) row.timestamp.toDouble / 1000.0 else row.value)
         return
       }
     }
     sampleToEmit.setValues(endTimestamp, Double.NaN)
+  }
+}
+
+// Keep the object for backward compatibility
+object LastSampleFunction extends LastSampleFunction(emitTimestamp = false)
+
+/**
+ * Timestamp function for iterating (sliding window) mode.
+ * Returns the timestamp of the last sample in the window, in seconds.
+ */
+class TimestampIteratingFunction extends RangeFunction[TransientRow] {
+  def addedToWindow(row: TransientRow, window: Window[TransientRow]): Unit = {}
+  def removedFromWindow(row: TransientRow, window: Window[TransientRow]): Unit = {}
+
+  def apply(startTimestamp: Long,
+            endTimestamp: Long,
+            window: Window[TransientRow],
+            sampleToEmit: TransientRow,
+            queryConfig: QueryConfig): Unit = {
+    // Return the timestamp of the last sample in the window, in seconds
+    if (window.size > 0) {
+      val lastSample = window.last
+      // Timestamp value should be in seconds (convert from milliseconds)
+      sampleToEmit.setValues(endTimestamp, lastSample.timestamp.toDouble / 1000.0)
+    } else {
+      sampleToEmit.setValues(endTimestamp, Double.NaN)
+    }
   }
 }
 
@@ -561,7 +643,7 @@ abstract class LastSampleChunkedFunction[R <: MutableRowReader](var timestamp: L
 extends ChunkedRangeFunction[R] {
   // Add each chunk and update timestamp and value such that latest sample wins
   // scalastyle:off parameter.number
-  def addChunks(tsVectorAcc: MemoryReader, tsVector: BinaryVectorPtr, tsReader: bv.LongVectorDataReader,
+  def addChunks(schema: Schema, tsVectorAcc: MemoryReader, tsVector: BinaryVectorPtr, tsReader: bv.LongVectorDataReader,
                 valueVectorAcc: MemoryReader, valueVector: BinaryVectorPtr, valueReader: VectorDataReader,
                 startTime: Long, endTime: Long, info: ChunkSetInfoReader, queryConfig: QueryConfig): Unit = {
     // Just in case timestamp vectors are a bit longer than others.
@@ -620,7 +702,7 @@ class LastSampleChunkedFunctionHMax(maxColID: Int,
 
   // Add each chunk and update timestamp and value such that latest sample wins
   // scalastyle:off parameter.number
-  def addChunks(tsVectorAcc: MemoryReader, tsVector: BinaryVectorPtr, tsReader: bv.LongVectorDataReader,
+  def addChunks(schema: Schema, tsVectorAcc: MemoryReader, tsVector: BinaryVectorPtr, tsReader: bv.LongVectorDataReader,
                 valueVectorAcc: MemoryReader, valueVector: BinaryVectorPtr, valueReader: VectorDataReader,
                 startTime: Long, endTime: Long, info: ChunkSetInfoReader, queryConfig: QueryConfig): Unit = {
     // Just in case timestamp vectors are a bit longer than others.
@@ -646,38 +728,36 @@ class LastSampleChunkedFunctionHMax(maxColID: Int,
   }
 }
 
-class LastSampleChunkedFunctionD extends LastSampleChunkedFuncDblVal() {
+class LastSampleChunkedFunctionD(val emitTimestamp: Boolean = false) extends LastSampleChunkedFuncDblVal() {
   def updateValue(ts: Long, valAcc: MemoryReader, valVector: BinaryVectorPtr,
                   valReader: VectorDataReader, endRowNum: Int): Unit = {
     val dblReader = valReader.asDoubleReader
     val doubleVal = dblReader(valAcc, valVector, endRowNum)
-    // If the last value is NaN, that may be Prometheus end of time series marker.
-    // In that case try to get the sample before last.
-    // If endRowNum==0, we are at beginning of chunk, and if the window included the last chunk, then
-    // the call to addChunks to the last chunk would have gotten the last sample value anyways.
-    if (java.lang.Double.isNaN(doubleVal)) {
-      if (endRowNum > 0) {
-        timestamp = ts
-        value = dblReader(valAcc, valVector, endRowNum - 1)
-      }
+
+    timestamp = ts
+    if (emitTimestamp) {
+      // For timestamp functions, use helper to handle NaN values properly
+      val (_, resultTimestamp) = QueryUtils.lastIgnoreNaN(value, timestamp, doubleVal, ts)
+      value = resultTimestamp.toDouble / 1000.0
     } else {
-      timestamp = ts
+      // Respect Prometheus staleness: if the last value is NaN (stale marker),
+      // propagate it so the series is correctly reported as stale.
       value = doubleVal
     }
   }
 }
 
-class LastSampleChunkedFunctionL extends LastSampleChunkedFuncDblVal() {
+class LastSampleChunkedFunctionL(val emitTimestamp: Boolean = false) extends LastSampleChunkedFuncDblVal() {
   def updateValue(ts: Long, valAcc: MemoryReader, valVector: BinaryVectorPtr,
                   valReader: VectorDataReader, endRowNum: Int): Unit = {
     val longReader = valReader.asLongReader
     timestamp = ts
-    value = longReader(valAcc, valVector, endRowNum).toDouble
+    value = if (emitTimestamp) timestamp else longReader(valAcc, valVector, endRowNum).toDouble
   }
 }
 
 class TimestampChunkedFunction (var value: Double = Double.NaN) extends ChunkedRangeFunction[TransientRow] {
-  def addChunks(tsVectorAcc: MemoryReader, tsVector: BinaryVectorPtr, tsReader: bv.LongVectorDataReader,
+  def addChunks(schema: Schema, tsVectorAcc: MemoryReader, tsVector: BinaryVectorPtr, tsReader: bv.LongVectorDataReader,
                 valueVectorAcc: MemoryReader, valueVector: BinaryVectorPtr, valueReader: VectorDataReader,
                 startTime: Long, endTime: Long, info: ChunkSetInfoReader, queryConfig: QueryConfig): Unit = {
     val endRowNum = Math.min(tsReader.ceilingIndex(tsVectorAcc, tsVector, endTime), info.numRows - 1)

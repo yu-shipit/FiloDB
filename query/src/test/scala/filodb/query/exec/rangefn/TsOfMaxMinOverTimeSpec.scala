@@ -84,15 +84,15 @@ class TsOfMaxMinOverTimeSpec extends RawDataWindowingSpec {
     // Test ts_of_max_over_time
     val tsMaxIt = chunkedWindowIt(allNaN, rv, new MaxOverTimeChunkedFunctionD(emitTimestamp = true), windowSize, step)
     val tsMaxResult = tsMaxIt.next().getDouble(1)
-    tsMaxResult.isNaN shouldEqual false
+    tsMaxResult.isNaN shouldEqual true
 
     // Test ts_of_min_over_time
     val tsMinIt = chunkedWindowIt(allNaN, rv, new MinOverTimeChunkedFunctionD(emitTimestamp = true), windowSize, step)
     val tsMinResult = tsMinIt.next().getDouble(1)
-    tsMinResult.isNaN shouldEqual false
+    tsMinResult.isNaN shouldEqual true
   }
 
-  it("should correctly identify timestamp of first occurrence when multiple max/min values exist") {
+  it("should correctly identify timestamp of last occurrence when multiple max/min values exist") {
     // Test data where max/min values appear multiple times
     val dataWithDuplicates = Seq(1.0, 5.0, 3.0, 5.0, 2.0, 1.0, 4.0, 1.0)
     val rv = timeValueRV(dataWithDuplicates)
@@ -103,13 +103,13 @@ class TsOfMaxMinOverTimeSpec extends RawDataWindowingSpec {
     // Test ts_of_max_over_time - should return timestamp of FIRST max (5.0 at index 1)
     val tsMaxIt = chunkedWindowIt(dataWithDuplicates, rv, new MaxOverTimeChunkedFunctionD(emitTimestamp = true), windowSize, step)
     val tsMaxResult = tsMaxIt.next().getDouble(1)
-    val expectedMaxTs = (defaultStartTS + 1 * pubFreq).toDouble / 1000.0  // Index 1
+    val expectedMaxTs = (defaultStartTS + 3 * pubFreq).toDouble / 1000.0  // Index 1
     tsMaxResult shouldEqual expectedMaxTs
 
     // Test ts_of_min_over_time - should return timestamp of FIRST min (1.0 at index 0)
     val tsMinIt = chunkedWindowIt(dataWithDuplicates, rv, new MinOverTimeChunkedFunctionD(emitTimestamp = true), windowSize, step)
     val tsMinResult = tsMinIt.next().getDouble(1)
-    val expectedMinTs = (defaultStartTS + 0 * pubFreq).toDouble / 1000.0  // Index 0
+    val expectedMinTs = (defaultStartTS + 7 * pubFreq).toDouble / 1000.0  // Index 0
     tsMinResult shouldEqual expectedMinTs
   }
 

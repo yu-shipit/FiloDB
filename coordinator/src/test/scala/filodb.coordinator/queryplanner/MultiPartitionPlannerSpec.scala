@@ -2758,7 +2758,7 @@ class MultiPartitionPlannerSpec extends AnyFunSpec with Matchers with PlanValida
     it("should fall back to getMetadataPartitions when a shard key filter is non-Equals (regex)") {
       val provider = makeFallbackProvider("legacy-remote-url", "direct-remote-url")
       val engine = makeMultiShardPlanner(provider)
-      // _ns_ uses a regex filter (EqualsRegex), not Equals → areEqualFilters=false → fallback
+      // _ns_ uses an open regex: no enumerable value set → areRoutableFilters=false → fallback
       val lp = Parser.labelValuesQueryToLogicalPlan(
         Seq("__metric__"), Some("""_ws_="demo",_ns_=~"ns.*""""),
         TimeStepParams(startSeconds, step, endSeconds))
@@ -2772,7 +2772,7 @@ class MultiPartitionPlannerSpec extends AnyFunSpec with Matchers with PlanValida
     it("should fall back to getMetadataPartitions when a shard key filter is NotEquals") {
       val provider = makeFallbackProvider("legacy-remote-url", "direct-remote-url")
       val engine = makeMultiShardPlanner(provider)
-      // _ns_!="ns1" is a NotEquals filter, not Equals → areEqualFilters=false → fallback
+      // _ns_!="ns1" is a NotEquals filter: no enumerable value set → areRoutableFilters=false → fallback
       val lp = Parser.labelValuesQueryToLogicalPlan(
         Seq("__metric__"), Some("""_ws_="demo",_ns_!="ns1""""),
         TimeStepParams(startSeconds, step, endSeconds))
@@ -2824,6 +2824,34 @@ class MultiPartitionPlannerSpec extends AnyFunSpec with Matchers with PlanValida
         plannerParams = PlannerParams(processMultiPartition = true)))
 
       capturedRoutingKey shouldEqual Map("_ws_" -> "demo", "_ns_" -> "ns1")
+    }
+
+    it("should expand a pipe-only regex shard key filter into one routing key per alternative") {
+      var capturedRoutingKeys = Seq.empty[Map[String, String]]
+      val provider = new PartitionLocationProvider {
+        override def getPartitions(routingKey: Map[String, String],
+                                   timeRange: TimeRange): List[PartitionAssignment] = {
+          capturedRoutingKeys = capturedRoutingKeys :+ routingKey
+          val ns = routingKey("_ns_")
+          List(PartitionAssignment(s"partition-$ns", s"url-$ns",
+            TimeRange(timeRange.startMs, timeRange.endMs), workUnit = "testWorkUnit"))
+        }
+
+        override def getMetadataPartitions(nonMetricShardKeyFilters: Seq[ColumnFilter],
+                                           timeRange: TimeRange): List[PartitionAssignment] =
+          List(PartitionAssignment("legacy-partition", "legacy-remote-url",
+            TimeRange(timeRange.startMs, timeRange.endMs), workUnit = "testWorkUnit"))
+      }
+      val engine = makeMultiShardPlanner(provider)
+      val lp = Parser.labelValuesQueryToLogicalPlan(
+        Seq("__metric__"), Some("""_ws_="demo",_ns_=~"ns1|ns2""""),
+        TimeStepParams(startSeconds, step, endSeconds))
+      engine.materialize(lp, QueryContext(origQueryParams = labelValuesQueryParams,
+        plannerParams = PlannerParams(processMultiPartition = true)))
+
+      // Each alternative is resolved on its own instead of widening to the whole workspace
+      capturedRoutingKeys.map(_("_ns_")).sorted shouldEqual Seq("ns1", "ns2")
+      capturedRoutingKeys.map(_("_ws_")).distinct shouldEqual Seq("demo")
     }
 
     it("should fall back to getMetadataPartitions when useLegacyMetadataRouting is true") {
